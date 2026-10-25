@@ -51,6 +51,8 @@ const SWELL: u32 = 0xF39A2B;
 const WHITE: u32 = 0xFFFFFF;
 /// Colorless: dons and kats alike.
 const GREY: u32 = 0x8c8ca6;
+/// Radar's sweep: a phosphor screen's green.
+const PHOSPHOR: u32 = 0x5ef0a8;
 
 pub const PAUSE_ITEMS: [&str; 5] = ["Continue", "Retry", "Playfield size", "Settings", "Quit to song select"];
 
@@ -2343,13 +2345,31 @@ impl Game {
             let (x, y, a) = geo.at(s, side);
             (x, y, a, size)
         };
+        // Radar: a sweep runs out from the drum every beat (twice a beat in kiai), fast at first
+        // and easing towards the far end. A note glows as it's passed and fades out over the
+        // next sweep; near the drum notes always show.
+        let radar_on = mods.has(Mod::Radar);
+        let sweep_p = (beats * if in_kiai { 2.0 } else { 1.0 }).rem_euclid(1.0);
+        let beam = lane_len * (1.0 - (1.0 - sweep_p).powi(2));
+        // Sweeps since the sweep passed `s` (0..1).
+        let radar_age = |s: f32| -> f32 {
+            let u = (s / lane_len).clamp(0.0, 1.0);
+            (sweep_p - (1.0 - (1.0 - u).sqrt())).rem_euclid(1.0)
+        };
+        let radar = |s: f32| -> f32 {
+            if !radar_on {
+                return 1.0;
+            }
+            let near = smooth(170.0, 110.0, s as f64) as f32;
+            near.max((1.0 - radar_age(s)).powf(2.2))
+        };
         // A window's notes fade in over the end of its lane rather than poke out past it.
         let fade_in = |s: f32| -> f32 { if boxed { smooth(lane_len as f64, (lane_len - 60.0) as f64, s as f64) as f32 } else { 1.0 } };
         // How visible an approaching note `s` along the lane is under the visual mods.
         let memory_over = mods.has(Mod::Memory) && vt > self.first_note + 15_000.0;
         let note_alpha = |s: f32| -> f32 {
             let u = s / lane_len;
-            let mut a = fade_in(s);
+            let mut a = fade_in(s) * radar(s);
             if mods.has(Mod::Hidden) {
                 // osu!lazer: fades out over the first 37.5% of its way in.
                 a *= ((u - 0.625) / 0.375).clamp(0.0, 1.0);
@@ -2401,7 +2421,8 @@ impl Game {
                 c.stretch_since(first, [x, y], squish, 1.0 / squish);
             }
         };
-        let (don, kat) = if mods.has(Mod::Colorless) { (GREY, GREY) } else { (mix(uni.idle(), uni.don(), look.colour), mix(uni.idle(), uni.kat(), look.colour)) };
+        // Echo: the colours are only shown under the lane, a bar early.
+        let (don, kat) = if mods.has(Mod::Colorless) || mods.has(Mod::Echo) { (GREY, GREY) } else { (mix(uni.idle(), uni.don(), look.colour), mix(uni.idle(), uni.kat(), look.colour)) };
         // Text is drawn last, after Mirror flips the rest (letters must stay readable).
         let mut texts: Vec<(f32, f32, f32, [f32; 4], String)> = Vec::new();
 
@@ -2482,6 +2503,30 @@ impl Game {
             }
         }
 
+        // Radar: the lane goes dark; range marks along it, and the sweep with its fading trail.
+        if radar_on {
+            const STEP: f32 = 8.0;
+            for k in 0..(lane_len / STEP).ceil() as usize {
+                let s = (k as f32 + 0.5) * STEP;
+                lane_rect(c, geo.at(s, 0.0), STEP + 1.5, LANE_H, rgba(0x040607, 0.66));
+            }
+            let mut s = 90.0;
+            while s < lane_len {
+                let near = smooth(48.0, 0.0, (s - beam).abs() as f64) as f32;
+                lane_rect(c, geo.at(s, 0.0), 1.2, LANE_H * 0.86, rgba(PHOSPHOR, 0.07 + 0.35 * near));
+                s += 90.0;
+            }
+            for k in 0..20 {
+                let s = beam - k as f32 * 5.0;
+                if s > 0.0 {
+                    lane_rect(c, geo.at(s, 0.0), 5.5, LANE_H, rgba(PHOSPHOR, 0.2 * (1.0 - k as f32 / 20.0).powi(2)));
+                }
+            }
+            let (bx, by, ba) = geo.at(beam, 0.0);
+            lane_rect(c, (bx, by, ba), 2.5, LANE_H, rgba(0xc8ffe2, 0.95));
+            c.glow(bx, by, 26.0, 18.0, rgba(PHOSPHOR, 0.18 + 0.12 * pulse));
+        }
+
         // Barlines.
         let first_bar = self.map.barlines.partition_point(|b| b.time < vt - 3000.0);
         let bars = if self.hide_notes { &[][..] } else { &self.map.barlines[first_bar..] };
@@ -2492,7 +2537,7 @@ impl Game {
             let s = s_of(b.time, b.velocity);
             if s > PANEL_W - HIT_X && s < lane_len + 2.0 {
                 let (x, y, a, _) = place(s, 0.0);
-                lane_rect(c, (x, y, a), 1.6, LANE_H, rgba(WHITE, 0.28));
+                lane_rect(c, (x, y, a), 1.6, LANE_H, rgba(WHITE, 0.28 * radar(s)));
             }
         }
         // Roulette: where the speed changes, and to what.
@@ -2570,6 +2615,13 @@ impl Game {
                                 if a > 0.01 {
                                     draw_hit(c, s, n, i, self.flows[i], col, a);
                                 }
+                                // Radar: the ping as the sweep finds it.
+                                let ping = radar_age(s);
+                                if radar_on && judged.is_none() && ping < 0.14 {
+                                    let k = ping / 0.14;
+                                    let (x, y, _, size) = place(s, 0.0);
+                                    c.ring(x, y, r * size * (1.0 + 0.9 * k), rgba(PHOSPHOR, 0.85 * (1.0 - k)), 2.5 * (1.0 - k) + 0.5);
+                                }
                             }
                         }
                     }
@@ -2581,7 +2633,7 @@ impl Game {
                         continue;
                     }
                     let (s0, s1) = if boxed { (s0.max(behind(r)), s1.min(lane_len)) } else { (s0, s1) };
-                    let a = if memory_over { 0.0 } else { fade_in(s0) };
+                    let a = if memory_over { 0.0 } else { fade_in(s0) * radar(s0) };
                     let body_r = r * 0.86;
                     if bent {
                         // The body follows the lane in short pieces (none across a portal).
@@ -2650,6 +2702,46 @@ impl Game {
                         c.ring(HIT_X, LANE_Y, SPIN_R + 4.0 + 14.0 * progress, rgba(SWELL, 0.6), 3.0);
                         let left = n.required_hits.saturating_sub(st.hits);
                         texts.push((HIT_X, LANE_Y - 12.0, 24.0, rgba(WHITE, 1.0), left.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Echo: the next bar's notes in colour under the lane, played out as this bar goes by: a
+        // playhead crosses it in time and each note rings as it's reached.
+        if mods.has(Mod::Echo) {
+            if let Some((i, start, len)) = bar_at(&self.map.barlines, vt, cp.beat_length * 4.0) {
+                let bars = &self.map.barlines;
+                let from = bars.get(i + 1).map_or(start + len, |b| b.time);
+                let to = bars.get(i + 2).map_or(from + len, |b| b.time);
+                let (x0, x1, y) = (PANEL_W + 24.0, w - 40.0, LANE_Y + LANE_H / 2.0 + 46.0);
+                let p = ((vt - start) / len).clamp(0.0, 1.0) as f32;
+                // In over the first moment of the bar, out over its last.
+                let a = smooth(0.0, 0.06, p as f64) as f32 * smooth(1.0, 0.94, p as f64) as f32;
+                c.rect(x0, y - 0.75, x1 - x0, 1.5, rgba(0x3a3a4e, a));
+                let beats_in = ((to - from) / cp.beat_length).round().max(1.0) as usize;
+                for b in 0..=beats_in {
+                    let x = x0 + (x1 - x0) * b as f32 / beats_in as f32;
+                    c.rect(x - 0.75, y - 7.0, 1.5, 14.0, rgba(0x4a4a5e, a));
+                }
+                let hx = x0 + (x1 - x0) * p;
+                c.glow(hx, y, 16.0, 10.0, rgba(WHITE, 0.12 * a));
+                c.rect(hx - 1.0, y - 16.0, 2.0, 32.0, rgba(WHITE, 0.55 * a));
+                let first = self.map.notes.partition_point(|n| n.time < from);
+                for n in self.map.notes[first..].iter().take_while(|n| n.time < to).filter(|n| matches!(n.kind, Kind::Don | Kind::Kat)) {
+                    let u = ((n.time - from) / (to - from)) as f32;
+                    let x = x0 + (x1 - x0) * u;
+                    let col = if n.kind == Kind::Don { uni.don() } else { uni.kat() };
+                    let r = if n.big { 9.5 } else { 6.5 };
+                    let reached = p >= u;
+                    let na = a * if reached { 1.0 } else { 0.45 };
+                    c.circle(x, y, r, rgba(col, na), rgba(WHITE, na), 1.5);
+                    if reached {
+                        let age = (p - u) * len as f32 / 380.0;
+                        if age < 1.0 {
+                            c.ring(x, y, r + 16.0 * age, rgba(col, 0.8 * (1.0 - age) * a), 2.0);
+                            c.glow(x, y, r + 6.0, 8.0, rgba(col, 0.35 * (1.0 - age) * a));
+                        }
                     }
                 }
             }

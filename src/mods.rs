@@ -66,6 +66,10 @@ pub enum Mod {
     Party,
     Overtime,
     Liar,
+    /// Prototype: a radar sweep lights the notes up as it passes.
+    Radar,
+    /// Prototype: each bar flashes its pattern in colour a bar early; on the lane they come colourless.
+    Echo,
     // Rails: the lane bent into a shape.
     Zigzag,
     UTurn,
@@ -90,12 +94,12 @@ pub enum Mod {
 
 use Mod::*;
 
-pub const ALL: [Mod; 73] = [
+pub const ALL: [Mod; 75] = [
     Easy, NoFail, HalfTime, Daycore, Half, NoFinishers, HardRock, SuddenDeath, Perfect, DoubleTime, Nightcore, Hidden,
     Flashlight, Precise, GreatOrNothing, Relax, Autoplay, Swap, Random, ConstantSpeed, Alternate, WindUp, WindDown, AllBig,
     Accel, Brake, Wave, Pulse, Stutter, SvChaos, Crescendo, Drop, Gearbox, Roulette, AntiSv, HyperSv, Even, Split, Swing,
     Leapfrog, Panic, Mercy, LagSpike, Moonwalk, SnapSpeed, Sudden, Blink, Blackout, Spotlight, Colorless, Memory, Decoy,
-    Party, Overtime, Liar, Zigzag, UTurn, Spiral, Loop, Elbow, Shapeshift, Snake, Mirror, Tilt, Spin, Mania, BarrelRoll, FlipFlop,
+    Party, Overtime, Liar, Radar, Echo, Zigzag, UTurn, Spiral, Loop, Elbow, Shapeshift, Snake, Mirror, Tilt, Spin, Mania, BarrelRoll, FlipFlop,
     Shatter, Cracked, Crumble, Portal, Multiverse,
 ];
 
@@ -106,7 +110,7 @@ pub const GROUPS: [(&str, u32, &[Mod]); 8] = [
     ("CONVERSION", 0x4fb4ff, &[Relax, Autoplay, Swap, Random, ConstantSpeed, Alternate, WindUp, WindDown, AllBig]),
     ("SCROLL", 0xFFD34D, &[Accel, Brake, Wave, Pulse, Stutter, SvChaos, Crescendo, Drop, Gearbox, Roulette]),
     ("SV LAB", 0xFF8A3D, &[AntiSv, HyperSv, Even, Split, Swing, Leapfrog, Panic, Mercy, LagSpike, Moonwalk, SnapSpeed]),
-    ("VISUAL", 0xc77dff, &[Sudden, Blink, Blackout, Spotlight, Colorless, Memory, Decoy, Party, Overtime, Liar]),
+    ("VISUAL", 0xc77dff, &[Sudden, Blink, Blackout, Spotlight, Colorless, Memory, Decoy, Party, Overtime, Liar, Radar, Echo]),
     ("RAILS", 0x5ee6c8, &[Zigzag, UTurn, Spiral, Loop, Elbow, Shapeshift, Snake]),
     ("PLAYFIELD", 0xff5fa2, &[Mirror, Tilt, Spin, Mania, BarrelRoll, FlipFlop, Shatter, Cracked, Crumble, Portal, Multiverse]),
 ];
@@ -187,6 +191,8 @@ impl Mod {
             Party => "PY",
             Overtime => "OT",
             Liar => "LI",
+            Radar => "RA",
+            Echo => "EC",
             Zigzag => "ZZ",
             UTurn => "UT",
             Spiral => "SI",
@@ -265,6 +271,8 @@ impl Mod {
             Party => "Party",
             Overtime => "Overtime",
             Liar => "Liar",
+            Radar => "Radar",
+            Echo => "Echo",
             Zigzag => "Zigzag",
             UTurn => "U-Turn",
             Spiral => "Spiral",
@@ -342,6 +350,8 @@ impl Mod {
             Decoy => "See-through fake notes fly in between the real ones and vanish before the drum.",
             Overtime => "It's me.",
             Liar => "Far off, triplets are spaced like 1/4s; their real spacing shows near the drum.",
+            Radar => "A sweep runs down the dark lane every beat; notes glow as it passes, then fade.",
+            Echo => "Each bar shows its colours a bar early, under the lane; on the lane notes are grey.",
             Party => "Everything flashy at once; notes pulse to their own rhythm, 1/4s four times a beat.",
             Zigzag => "The lane zigzags across the screen.",
             UTurn => "Notes come in along the top, make a U-turn and come back to the drum.",
@@ -379,7 +389,7 @@ impl Mod {
             Spotlight | Blackout | Memory | Colorless => 1.1,
             // Hard to read or to play: notes that lie about where or when they'll arrive.
             SvChaos | Even => 1.08,
-            Sudden | Blink | Decoy | Liar | Alternate | WindUp | Stutter | Roulette | HyperSv | Split | Leapfrog | LagSpike | Moonwalk => 1.06,
+            Sudden | Blink | Decoy | Liar | Radar | Echo | Alternate | WindUp | Stutter | Roulette | HyperSv | Split | Leapfrog | LagSpike | Moonwalk => 1.06,
             Spiral | Shapeshift | Spin | Portal => 1.06,
             // Noticeably harder.
             GreatOrNothing | Random | Accel | Brake | Pulse | Crescendo | Drop | Gearbox | AntiSv | Swing | Panic | SnapSpeed => 1.04,
@@ -457,7 +467,7 @@ impl Mod {
 
     /// Mods that hide or disguise notes: one of them at a time is plenty.
     fn obscures(self) -> bool {
-        matches!(self, Hidden | Sudden | Flashlight | Spotlight | Blink | Colorless | Decoy | Liar | Multiverse)
+        matches!(self, Hidden | Sudden | Flashlight | Spotlight | Blink | Colorless | Decoy | Liar | Radar | Echo | Multiverse)
     }
 
     /// Mods that change where and how fast notes travel.
