@@ -2439,6 +2439,10 @@ impl Game {
         // Lane. When it turns, it reaches past the screen so its ends never show.
         let turns = mods.has(Mod::Tilt) || mods.has(Mod::Spin) || mods.has(Mod::Mania) || mods.has(Mod::BarrelRoll);
         let mut lane_col = if kiai { rgba(0x2b2433, 1.0) } else { rgba(0x20202b, 1.0) };
+        if radar_on {
+            // A radar screen: dark, a trace of green.
+            lane_col = rgba(0x0a100e, 1.0);
+        }
         let mut edge_col = rgba(0x3a3a4e, 1.0);
         if kiai {
             lane_col = tint(lane_col, 0xff8a3d, 0.05 + 0.06 * pulse);
@@ -2503,13 +2507,8 @@ impl Game {
             }
         }
 
-        // Radar: the lane goes dark; range marks along it, and the sweep with its fading trail.
+        // Radar: range marks along the lane, and the sweep with its fading trail.
         if radar_on {
-            const STEP: f32 = 8.0;
-            for k in 0..(lane_len / STEP).ceil() as usize {
-                let s = (k as f32 + 0.5) * STEP;
-                lane_rect(c, geo.at(s, 0.0), STEP + 1.5, LANE_H, rgba(0x040607, 0.66));
-            }
             let mut s = 90.0;
             while s < lane_len {
                 let near = smooth(48.0, 0.0, (s - beam).abs() as f64) as f32;
@@ -2519,7 +2518,7 @@ impl Game {
             for k in 0..20 {
                 let s = beam - k as f32 * 5.0;
                 if s > 0.0 {
-                    lane_rect(c, geo.at(s, 0.0), 5.5, LANE_H, rgba(PHOSPHOR, 0.2 * (1.0 - k as f32 / 20.0).powi(2)));
+                    lane_rect(c, geo.at(s, 0.0), 5.0, LANE_H, rgba(PHOSPHOR, 0.2 * (1.0 - k as f32 / 20.0).powi(2)));
                 }
             }
             let (bx, by, ba) = geo.at(beam, 0.0);
@@ -2722,7 +2721,7 @@ impl Game {
                 let beats_in = ((to - from) / cp.beat_length).round().max(1.0) as usize;
                 for b in 0..=beats_in {
                     let x = x0 + (x1 - x0) * b as f32 / beats_in as f32;
-                    c.rect(x - 0.75, y - 7.0, 1.5, 14.0, rgba(0x4a4a5e, a));
+                    c.rect(x - 0.75, y - 4.0, 1.5, 8.0, rgba(0x4a4a5e, 0.7 * a));
                 }
                 let hx = x0 + (x1 - x0) * p;
                 c.glow(hx, y, 16.0, 10.0, rgba(WHITE, 0.12 * a));
@@ -2732,10 +2731,14 @@ impl Game {
                     let u = ((n.time - from) / (to - from)) as f32;
                     let x = x0 + (x1 - x0) * u;
                     let col = if n.kind == Kind::Don { uni.don() } else { uni.kat() };
-                    let r = if n.big { 9.5 } else { 6.5 };
+                    let r = if n.big { 12.0 } else { 8.5 };
                     let reached = p >= u;
-                    let na = a * if reached { 1.0 } else { 0.45 };
-                    c.circle(x, y, r, rgba(col, na), rgba(WHITE, na), 1.5);
+                    // Coming up: the colour, dimmed; reached: lit, with a white rim.
+                    if reached {
+                        c.circle(x, y, r, rgba(col, a), rgba(WHITE, a), 2.0);
+                    } else {
+                        c.circle(x, y, r, rgba(mix(0x15151d, col, 0.7), a), rgba(mix(0x15151d, col, 0.9), a), 1.5);
+                    }
                     if reached {
                         let age = (p - u) * len as f32 / 380.0;
                         if age < 1.0 {
