@@ -677,6 +677,23 @@ mod tests {
             &hitsound_set(48_000, Custom::default())[0],
             &a[0]
         ));
+        // A skin's whistle is a big kat's top layer, as in taiko_arranger; big don keeps finish.
+        let whistled = hitsound_set(
+            48_000,
+            Custom {
+                whistle: Some(vec![0.4]),
+                finish: Some(vec![0.1]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            &*whistled[Sfx::BigKat as usize],
+            mix(&a[Sfx::Kat as usize], &[0.4])
+        );
+        assert_eq!(
+            &*whistled[Sfx::BigDon as usize],
+            mix(&a[Sfx::Don as usize], &[0.1])
+        );
     }
 
     #[test]
@@ -1273,8 +1290,11 @@ impl Noise {
 pub struct Custom {
     pub don: Option<Vec<f32>>,
     pub kat: Option<Vec<f32>>,
-    /// Played on top of don / kat for big notes.
+    /// Played on top of don for big notes, and of kat when there's no `whistle`.
     pub finish: Option<Vec<f32>>,
+    /// Played on top of kat for big kats: taiko_arranger's finisher (hitclap + hitwhistle,
+    /// owner, 2026-10-08).
+    pub whistle: Option<Vec<f32>>,
     pub combobreak: Option<Vec<f32>>,
 }
 
@@ -1359,7 +1379,9 @@ pub fn hitsound_set(rate: u32, custom: Custom) -> Sounds {
     if custom_don || custom_finish {
         sounds[Sfx::BigDon as usize] = mix(&sounds[Sfx::Don as usize], &finish).into();
     }
-    if custom_kat || custom_finish {
+    if let Some(whistle) = custom.whistle {
+        sounds[Sfx::BigKat as usize] = mix(&sounds[Sfx::Kat as usize], &whistle).into();
+    } else if custom_kat || custom_finish {
         sounds[Sfx::BigKat as usize] = mix(&sounds[Sfx::Kat as usize], &finish).into();
     }
     if let Some(combo) = custom.combobreak {

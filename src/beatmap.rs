@@ -56,7 +56,8 @@ pub struct Note {
     /// press for its zero-length roll went to the next note, a miss on a kat (owner,
     /// 2026-10-28).
     pub tiny: bool,
-    /// A don/kat right before a slider of length NaN: stable can't hit it (owner, 2026-10-28).
+    /// A don/kat outside stable's object window at its own time (a NaN slider derails the
+    /// window's search; `mark_unhittable`): it can't be hit and is never judged.
     pub unhittable: bool,
 }
 
@@ -486,9 +487,10 @@ fn convert(map: &mut Beatmap, mut body: Body) {
     let swell_hit_multiplier = difficulty_range(meta.od, 3.0, 5.0, 7.5) * 1.65;
 
     let mut notes = Vec::with_capacity(body.objects.len());
-    // Sliders of length NaN: drawn as nothing, and in stable the don/kat right before each one
-    // (left of it on the lane), however close, can't be hit (owner, 2026-10-28).
-    let mut nan_sliders = Vec::new();
+    // Every object as stable's object window sees it, for `mark_unhittable`.
+    // ponytail: an object with a NaN time is left out (taiko_arranger's parser drops it too);
+    // whether stable keeps one with a degenerate end is unread (Kikuo's [Aspire] has 1,858).
+    let mut objects: Vec<(i64, i64, Option<usize>)> = Vec::with_capacity(body.objects.len());
     for line in &body.objects {
         let f: Vec<&str> = line.split(',').collect();
         if f.len() < 5 {
@@ -498,6 +500,7 @@ fn convert(map: &mut Beatmap, mut body: Body) {
             continue;
         };
         let time = time + version_offset;
+        let start = time.is_finite().then_some(time as i64);
         let ty: u32 = f[3].trim().parse().unwrap_or(1);
         let sound: u32 = f[4].trim().parse().unwrap_or(0);
         let velocity = velocity_at(time);
@@ -506,14 +509,21 @@ fn convert(map: &mut Beatmap, mut body: Body) {
             // Slider: drumroll, or a stream of hits for short standard sliders.
             let spans = f[6].trim().parse::<u32>().unwrap_or(1).max(1);
             let raw_length = f[7].trim().parse::<f64>().unwrap_or(0.0);
+            let cp = control_point_at(&cps, time);
+            let sv_beat_length = cp.beat_length / cp.sv;
+            // Stable's drumroll EndTime, (int)-cast: a NaN slider's is 2^31 ms before its start.
+            // No x1.4 here: it cancels, as in lazer's converter.
+            if let Some(s) = start {
+                let len =
+                    raw_length * spans as f64 / (100.0 * meta.slider_multiplier) * sv_beat_length;
+                objects.push((s, s + cs_int(len), None));
+            }
+            // A NaN slider is drawn as nothing; its effect is the window above.
             if raw_length.is_nan() {
-                nan_sliders.push(time);
                 continue;
             }
             let length = raw_length.max(0.0);
-            let cp = control_point_at(&cps, time);
             let distance = length * TAIKO_VELOCITY_MULTIPLIER * spans as f64;
-            let sv_beat_length = cp.beat_length / cp.sv;
             let taiko_velocity = 100.0 * sm;
             let duration = playable_length((distance / taiko_velocity * sv_beat_length).floor());
             // The duration a negative length works out to, made positive: osu! still draws that
@@ -548,32 +558,44 @@ fn convert(map: &mut Beatmap, mut body: Body) {
                     .map(|s| s.split('|').filter_map(|x| x.trim().parse().ok()).collect())
                     .filter(|v: &Vec<u32>| !v.is_empty())
                     .unwrap_or_else(|| vec![sound; spans as usize + 1]);
+                // Split into hits: each is its own object to stable, not the slider.
+                if start.is_some() {
+                    objects.pop();
+                }
                 let mut t = time;
                 let mut i = 0;
                 while t <= time + duration + spacing / 8.0 {
                     let s = node_sounds[i % node_sounds.len()];
+                    objects.push((t as i64, t as i64, Some(notes.len())));
                     notes.push(hit(t, s, velocity_at(t)));
                     i += 1;
                     t += spacing;
                 }
             } else {
-                // 1/4 (1/3 at tick rate 3); twice as dense at 125 BPM or slower, half above 250.
-                let roll_tick_rate = if tick_rate == 3.0 { 3.0 } else { 4.0 };
-                let bpm = 60_000.0 / cp.beat_length;
-                let roll_tick_rate = if bpm <= 125.0 {
-                    roll_tick_rate * 2.0
-                } else if bpm > 250.0 {
-                    roll_tick_rate / 2.0
-                } else {
-                    roll_tick_rate
-                };
+                // 1/8 of the beat (1/6 at tick rate 3, 6 or 1.5), doubled while under 60 ms and
+                // halved while over 120: stable's drumroll, read from osu!.exe (taiko_arranger's
+                // `drumroll_tick_times`, 2026-11-04). The old 1/4-beat rule ticked every 1.5 ms
+                // under a gimmick's 60000 BPM line and stacked rolls buzzed.
+                // ponytail: stable spaces by the unclamped beat; ours is clamped to 6 ms first.
+                let mut tick = cp.beat_length
+                    / if matches!(tick_rate, 3.0 | 6.0 | 1.5) {
+                        6.0
+                    } else {
+                        8.0
+                    };
+                while tick < 60.0 {
+                    tick *= 2.0;
+                }
+                while tick > 120.0 {
+                    tick /= 2.0;
+                }
                 notes.push(Note {
                     time,
                     end_time: time + duration,
                     kind: Kind::Roll,
                     big: sound & 4 != 0,
                     velocity,
-                    tick_spacing: cp.beat_length / roll_tick_rate,
+                    tick_spacing: tick,
                     required_hits: 0,
                     fake_len,
                     // The cap is fake_len ahead of the head; osu! counts whole ms (owner, 2026-10-28).
@@ -590,6 +612,9 @@ fn convert(map: &mut Beatmap, mut body: Body) {
                 .map(|e| e + version_offset)
                 .unwrap_or(time)
                 .max(time);
+            if let Some(s) = start {
+                objects.push((s, end as i64, None));
+            }
             let end = time + playable_length(end - time);
             let required = ((end - time) / 1000.0 * swell_hit_multiplier).max(1.0) as u32;
             notes.push(Note {
@@ -607,20 +632,14 @@ fn convert(map: &mut Beatmap, mut body: Body) {
                 unhittable: false,
             });
         } else if ty & 1 != 0 {
+            if let Some(s) = start {
+                objects.push((s, s, Some(notes.len())));
+            }
             notes.push(hit(time, sound, velocity));
         }
     }
+    mark_unhittable(&mut notes, objects, stable_preempt(scroll[0].1) as i64);
     notes.sort_by(|a, b| a.time.total_cmp(&b.time));
-    for t in nan_sliders {
-        let before = notes.partition_point(|n| n.time < t);
-        if let Some(n) = notes[..before]
-            .iter_mut()
-            .rev()
-            .find(|n| matches!(n.kind, Kind::Don | Kind::Kat))
-        {
-            n.unhittable = true;
-        }
-    }
 
     let end = notes.last().map(|n| n.end_time).unwrap_or(0.0);
     map.barlines = build_barlines(&body.timing, end, &velocity_at);
@@ -671,6 +690,65 @@ pub fn calibration_map(beat_ms: f64, first_beat: u32, beats: u32) -> Beatmap {
         barlines,
         control_points,
         first_velocity: velocity,
+    }
+}
+
+/// Stable's taiko PreEmpt (ms): how long 1000 osu!px take at the map's *first* timing point
+/// (`first_velocity`, osu!px per ms), once for the whole map, at most 5 s. Read from osu!.exe
+/// (`min(5000, 600 / VelocityAt(first timing point) / 0.6 * 1000)`; KatsuDonEditor's
+/// `stable_preempt`, 2026-10-30).
+pub fn stable_preempt(first_velocity: f64) -> f64 {
+    if first_velocity <= 0.0 {
+        return 5000.0;
+    }
+    (1000.0 / first_velocity).min(5000.0).floor()
+}
+
+/// C#'s `(int)` of a double on 32-bit .NET Framework: NaN and anything out of range are
+/// `int.MinValue`, the rest truncate toward zero.
+fn cs_int(x: f64) -> i64 {
+    if x.is_nan() || x >= 2147483648.0 || x < -2147483648.0 {
+        i32::MIN as i64
+    } else {
+        x.trunc() as i64
+    }
+}
+
+/// Where stable's object window starts: .NET's `List.BinarySearch` for `probe` over the objects'
+/// end times. The list is sorted by start, not end, so a NaN slider's end (2^31 ms before its
+/// start) sends the search right past every object before it.
+fn window_start(ends: &[i64], probe: i64) -> usize {
+    let (mut lo, mut hi) = (0i64, ends.len() as i64 - 1);
+    while lo <= hi {
+        let mid = lo + ((hi - lo) >> 1);
+        let e = ends[mid as usize];
+        if e == probe {
+            return mid as usize;
+        }
+        if e < probe {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo as usize
+}
+
+/// Marks the don/kats stable can't hit: those outside its object window at their own time
+/// (osu!.exe's HitObjectManager, read by taiko_arranger's session, 2026-11-05). `objects` are
+/// (start, end, the note's index if it's a don/kat) in file order; an unhittable note is never
+/// judged, so it's no miss either.
+fn mark_unhittable(notes: &mut [Note], mut objects: Vec<(i64, i64, Option<usize>)>, preempt: i64) {
+    objects.sort_by_key(|o| o.0); // stable: ties keep file order, as stable's list does
+    let ends: Vec<i64> = objects.iter().map(|o| o.1).collect();
+    let last = objects.len().saturating_sub(1);
+    for (i, &(t, _, note)) in objects.iter().enumerate() {
+        let Some(n) = note else { continue };
+        let a = window_start(&ends, t - preempt);
+        let end = a.max(objects.partition_point(|o| o.0 <= t + preempt).min(last));
+        if i < a || i > end {
+            notes[n].unhittable = true;
+        }
     }
 }
 
@@ -921,6 +999,58 @@ SliderTickRate:1
         assert_eq!(
             kinds,
             [(1000.0, Kind::Don, true), (1500.0, Kind::Kat, false)]
+        );
+    }
+
+    /// taiko_arranger's `tests/test_stable_window.py`: circles 100 ms apart, PreEmpt 1000.
+    #[test]
+    fn a_nan_slider_hides_what_stables_window_loses() {
+        let hidden = |nan_at: Option<usize>, count: usize| {
+            let mut notes: Vec<Note> = (0..count).map(|i| hit(i as f64 * 100.0, 0, 1.0)).collect();
+            let objects = (0..count)
+                .map(|i| {
+                    let t = i as i64 * 100;
+                    if Some(i) == nan_at {
+                        (t, t + cs_int(f64::NAN), None)
+                    } else {
+                        (t, t, Some(i))
+                    }
+                })
+                .collect();
+            mark_unhittable(&mut notes, objects, 1000);
+            (0..count)
+                .filter(|&i| notes[i].unhittable)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hidden(Some(3), 7), [0, 1, 2]);
+        // The old "last don/kat before it" rule wrongly dropped 5 here.
+        assert!(hidden(Some(6), 7).is_empty());
+        assert!(hidden(None, 50).is_empty());
+        let min = i32::MIN as i64;
+        assert_eq!(
+            [f64::NAN, f64::INFINITY, 2147483648.0, -2.7].map(cs_int),
+            [min, min, min, -2]
+        );
+    }
+
+    /// Stable's window on a real map (checked against stable by the owner, 2026-11-05).
+    #[test]
+    #[ignore = "needs Spectacle in the local osu! Songs folder"]
+    fn spectacles_nan_sliders_hide_the_circles_stable_hides() {
+        let text = std::fs::read_to_string(r"D:\osu!\Songs\1230319 Ruby My Dear - Spectacle\Ruby My Dear - Spectacle (Mew) [FeelsTaikoMan].osu").unwrap();
+        let hidden: Vec<f64> = parse(&text)
+            .notes
+            .iter()
+            .filter(|n| n.unhittable)
+            .map(|n| n.time)
+            .collect();
+        assert_eq!(
+            hidden,
+            [
+                130135.0, 130285.0, 130585.0, 130735.0, 131035.0, 131185.0, 131485.0, 131635.0,
+                131935.0, 132085.0, 132385.0, 132535.0, 132835.0, 132985.0, 133285.0, 133435.0,
+                133735.0, 133885.0, 134185.0, 134335.0, 134635.0
+            ]
         );
     }
 

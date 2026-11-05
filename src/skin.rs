@@ -814,6 +814,9 @@ fn hitsounds_of(files: &Files, rate: u32) -> audio::Custom {
         finish: files
             .sound(&["taiko-normal-hitfinish"])
             .and_then(|p| decode_sound(p, rate)),
+        whistle: files
+            .sound(&["taiko-normal-hitwhistle"])
+            .and_then(|p| decode_sound(p, rate)),
         combobreak: files
             .sound(&["combobreak"])
             .and_then(|p| decode_sound(p, rate)),

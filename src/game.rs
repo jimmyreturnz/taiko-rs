@@ -59,6 +59,15 @@ pub const NOTE_R: f32 = 31.0;
 pub const BIG_R: f32 = 46.0;
 /// A spinner being hit: its circle over the drum (a skin's 128 px spinner image at this radius).
 const SPIN_R: f32 = 50.0;
+
+/// A head's radius: a spinner comes in at finisher size, as taiko_arranger's preview draws it.
+fn head_r(n: &beatmap::Note) -> f32 {
+    if n.big || n.kind == Kind::Swell {
+        BIG_R
+    } else {
+        NOTE_R
+    }
+}
 /// Second key of a big note must land within this window of the first.
 const STRONG_WINDOW: f64 = 30.0;
 const HIT_ANIM_MS: f64 = 160.0;
@@ -1365,16 +1374,7 @@ fn kiai_brighten(col: u32) -> u32 {
     (ch(16) + add).min(255) << 16 | (ch(8) + add).min(255) << 8 | (ch(0) + add).min(255)
 }
 
-/// Stable's taiko PreEmpt (ms): how long 1000 osu!px take at the map's *first* timing point
-/// (`first_velocity`, osu!px per ms), once for the whole map, at most 5 s. Read from osu!.exe
-/// (`min(5000, 600 / VelocityAt(first timing point) / 0.6 * 1000)`; KatsuDonEditor's
-/// `stable_preempt`, 2026-10-30).
-fn stable_preempt(first_velocity: f64) -> f64 {
-    if first_velocity <= 0.0 {
-        return 5000.0;
-    }
-    (1000.0 / first_velocity).min(5000.0).floor()
-}
+use beatmap::stable_preempt;
 
 /// A swell's alpha `until` ms before it starts: stable's SpinnerTaiko fades it in linearly from
 /// PreEmpt before to 0.6 PreEmpt before. The PreEmpt is the map's, from its first SV, not the
@@ -2581,9 +2581,17 @@ impl Game {
                 Kind::Roll if !st.finished && !n.tiny && !self.roll_over_notes(i) => {
                     let spacing = self.map.notes[i].tick_spacing;
                     let k = ((t - time) / spacing).floor().max(0.0) as usize;
-                    if self.state[i].ticks.get(k).is_some_and(|hit| !hit) {
+                    // A tick in a coming note's miss window would be judged as that note (a don
+                    // tick on a kat): skipped, a missed tick costs no combo (owner, 2026-10-29).
+                    // Rolls stacked on one place tick on the same ms, and one press is one hit:
+                    // the first roll there takes it (taiko_arranger, owner, 2026-11-04).
+                    let tick = time + k as f64 * spacing;
+                    if self.state[i].ticks.get(k).is_some_and(|hit| !hit)
+                        && self.next_hittable(tick).is_none()
+                        && !self.presses.iter().any(|&p| p.round() == tick.round())
+                    {
                         let key = crate::autoplay::roll_key(k, self.autoplay_style.left_handed);
-                        self.auto_hit(key, time + k as f64 * spacing, audio);
+                        self.auto_hit(key, tick, audio);
                     }
                 }
                 // One swell at a time (`judge_press` gives the earliest every press), at most every
@@ -4574,7 +4582,7 @@ impl Game {
         for i in order {
             let n = &self.map.notes[i];
             let st = &self.state[i];
-            let r = if n.big { BIG_R } else { NOTE_R };
+            let r = head_r(n);
             match n.kind {
                 Kind::Don | Kind::Kat => {
                     let col = if n.kind == Kind::Don { don } else { kat };
@@ -4979,7 +4987,7 @@ impl Game {
         if self.kiai_effects {
             for &i in &self.visible {
                 let n = &self.map.notes[i];
-                let r = if n.big { BIG_R } else { NOTE_R };
+                let r = head_r(n);
                 let sprite = if n.big {
                     Sprite::BigCircle
                 } else {
@@ -8500,6 +8508,63 @@ mod tests {
         }
         assert_eq!((g.state[4].judged, g.stats.miss), (None, 0));
         assert_eq!(g.state[5].judged, Some(Judge::Great));
+    }
+
+    #[test]
+    fn autoplay_skips_a_roll_tick_in_the_next_notes_window() {
+        // Note 4 a roll to 450 ms on, ticks every 150: its last, at +450, is 50 ms before note 5,
+        // a kat. Played, that don tick was judged as the kat: a miss (Spectacle, 1:10).
+        let mut map = beatmap::calibration_map(500.0, 0, 64);
+        let n = &mut map.notes[4];
+        (n.kind, n.end_time, n.tick_spacing) = (Kind::Roll, n.time + 450.0, 150.0);
+        map.notes[5].kind = Kind::Kat;
+        let mut g = Game::new(
+            map,
+            Arc::new(Track {
+                samples: Vec::new(),
+                rate: 1.0,
+                stream: None,
+            }),
+            None,
+        );
+        for k in 0..800 {
+            g.time = k as f64 * 10.0;
+            g.autoplay(None);
+            g.expire(g.time);
+        }
+        assert_eq!(g.state[5].judged, Some(Judge::Great));
+        assert_eq!(g.stats.miss, 0);
+    }
+
+    #[test]
+    fn autoplay_hits_rolls_stacked_on_one_place_once() {
+        // Notes 4 and 5: two rolls on one ms, 300 ms long, ticks every 100 (0, 100, 200, 300).
+        let mut map = beatmap::calibration_map(500.0, 0, 64);
+        let t = map.notes[4].time;
+        for n in &mut map.notes[4..6] {
+            (n.time, n.kind, n.end_time, n.tick_spacing) = (t, Kind::Roll, t + 300.0, 100.0);
+        }
+        let mut g = Game::new(
+            map,
+            Arc::new(Track {
+                samples: Vec::new(),
+                rate: 1.0,
+                stream: None,
+            }),
+            None,
+        );
+        g.log_inputs = true;
+        for k in 0..800 {
+            g.time = k as f64 * 10.0;
+            g.autoplay(None);
+            g.expire(g.time);
+        }
+        let presses = g
+            .inputs
+            .iter()
+            .filter(|&&(at, _)| at >= t && at <= t + 300.0)
+            .count();
+        assert_eq!(presses, 4);
     }
 
     #[test]
